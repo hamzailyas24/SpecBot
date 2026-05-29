@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Build
+dist/
+build/
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# Data (never commit these)
+*.csv
+chromadb/
+chroma/
+pgdata/
+backup.sql
+*.sql
+
+# Docker overrides
+docker-compose.override.yml
+
+# Misc
+*.zip
+*.tar.gz
+coverage/
