@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, forwardRef, useImperativeHandle } from "react";
 import { Send, Trash2, Bot, User, Loader2, Sparkles, Zap } from "lucide-react";
 import api from "../api/client.js";
 import toast from "react-hot-toast";
@@ -10,7 +10,6 @@ const SUGGESTIONS = [
   "Which phone has the best ultrawide camera?",
 ];
 
-// Minimal markdown → HTML (no deps)
 function renderMarkdown(text) {
   return text
     .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
@@ -19,7 +18,7 @@ function renderMarkdown(text) {
     .replace(/^### (.+)$/gm, "<h3>$1</h3>")
     .replace(/^## (.+)$/gm, "<h2>$1</h2>")
     .replace(/^# (.+)$/gm, "<h1>$1</h1>")
-    .replace(/^\- (.+)$/gm, "<li>$1</li>")
+    .replace(/^- (.+)$/gm, "<li>$1</li>")
     .replace(/(<li>.*<\/li>)/gs, "<ul>$1</ul>")
     .replace(/\n{2,}/g, "</p><p>")
     .replace(/^(?!<[hul])/gm, "")
@@ -56,10 +55,11 @@ function Bubble({ msg }) {
   );
 }
 
-export default function Chat({ onNewMessage }) {
+const Chat = forwardRef(function Chat({ onNewMessage }, ref) {
   const [messages, setMessages] = useState([]);
-  const [input, setInput] = useState("");
-  const [sending, setSending] = useState(false);
+  const [input, setInput]       = useState("");
+  const [sending, setSending]   = useState(false);
+  const [resumed, setResumed]   = useState(false);
   const bottomRef = useRef(null);
   const inputRef  = useRef(null);
 
@@ -67,20 +67,43 @@ export default function Chat({ onNewMessage }) {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  useImperativeHandle(ref, () => ({
+    loadConversation(historyItem) {
+      setMessages([
+        { id: "h-user", role: "user",      content: historyItem.message },
+        { id: "h-ai",   role: "assistant", content: historyItem.response, cached: historyItem.cached },
+      ]);
+      setResumed(true);
+      setTimeout(() => inputRef.current?.focus(), 100);
+      toast.success("Conversation Resumed");
+    },
+  }));
+
   const send = useCallback(async (text) => {
     const content = (text || input).trim();
     if (!content || sending) return;
     setInput("");
     setSending(true);
+    setResumed(false);
 
-    const userMsg = { id: Date.now(), role: "user", content };
+    const userMsg = { id: Date.now(),     role: "user",      content };
     const loadMsg = { id: Date.now() + 1, role: "assistant", content: "", loading: true };
     setMessages((prev) => [...prev, userMsg, loadMsg]);
 
+    const historyForAPI = messages
+      .filter((m) => !m.loading)
+      .map((m) => ({ role: m.role, content: m.content }));
+
     try {
-      const { data } = await api.post("/chat", { message: content });
+      const { data } = await api.post("/chat", {
+        message: content,
+        history: historyForAPI,
+      });
       setMessages((prev) =>
-        prev.map((m) => m.loading ? { ...m, content: data.response, cached: data.cached, loading: false } : m)
+        prev.map((m) => m.loading
+          ? { ...m, content: data.response, cached: data.cached, loading: false }
+          : m
+        )
       );
       onNewMessage?.();
     } catch (err) {
@@ -90,25 +113,29 @@ export default function Chat({ onNewMessage }) {
       setSending(false);
       inputRef.current?.focus();
     }
-  }, [input, sending, onNewMessage]);
+  }, [input, sending, messages, onNewMessage]);
 
   return (
     <div className="flex flex-col h-full">
-      {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-border flex-shrink-0">
         <div className="flex items-center gap-2">
           <span className="w-2 h-2 bg-green-400 rounded-full animate-pulse-slow" />
           <span className="text-sm font-display font-semibold">AI Chat</span>
           <span className="badge-accent text-xs">Llama 3.3 70B</span>
+          {resumed && (
+            <span className="text-xs text-amber-400 border border-amber-400/30 rounded-full px-2 py-0.5">
+              ↩ resumed
+            </span>
+          )}
         </div>
         {messages.length > 0 && (
-          <button onClick={() => setMessages([])} className="text-muted hover:text-subtle transition-colors">
+          <button onClick={() => { setMessages([]); setResumed(false); }}
+            className="text-muted hover:text-subtle transition-colors">
             <Trash2 size={13} />
           </button>
         )}
       </div>
 
-      {/* Messages */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4 min-h-0">
         {messages.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center py-8 text-center">
@@ -134,13 +161,12 @@ export default function Chat({ onNewMessage }) {
         <div ref={bottomRef} />
       </div>
 
-      {/* Input */}
       <div className="p-4 border-t border-border flex-shrink-0">
         <div className="flex gap-2">
           <input ref={inputRef} type="text" value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && send()}
-            placeholder="Ask about any phone…"
+            placeholder={resumed ? "Aage poochho…" : "Ask about any phone…"}
             className="input-field flex-1" disabled={sending} />
           <button onClick={() => send()} disabled={!input.trim() || sending}
             className="btn-primary px-3 flex items-center justify-center">
@@ -150,4 +176,6 @@ export default function Chat({ onNewMessage }) {
       </div>
     </div>
   );
-}
+});
+
+export default Chat;

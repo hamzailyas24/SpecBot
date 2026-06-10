@@ -3,37 +3,41 @@ import logger from "../utils/logger.js";
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-const SYSTEM_PROMPT = `You are GSM-AI, the world's most knowledgeable smartphone analyst.
-You have deep expertise on every phone released from 2016 to 2026.
-Rules:
-- Be direct, opinionated, and concise. Users want answers, not essays.
-- When comparing phones, use a clear structure: specs summary, winner per category, final verdict.
-- When recommending, always give a specific pick with reasoning.
-- Format responses with markdown — use **bold** for phone names, bullet points for specs.
-- Never say "I don't know" — make your best expert judgment based on context provided.`;
+const SYSTEM_PROMPT = `You are GSM-AI, an expert smartphone research assistant with access to a database of 24,000+ phones.
 
-export const queryAI = async (userMessage, context = "") => {
-  const messages = [{ role: "system", content: SYSTEM_PROMPT }];
+Guidelines:
+- Give accurate, spec-based answers using the provided phone context
+- Use markdown tables for comparisons
+- Be concise but thorough
+- If asked about a specific phone not in context, use your general knowledge
+- Always mention key specs: RAM, storage, chipset, battery, camera
+- Format prices in USD unless specified otherwise`;
 
-  if (context) {
-    messages.push({
-      role: "system",
-      content: `Real spec data from our database — use this as ground truth:\n\n${context}`,
-    });
-  }
-
-  messages.push({ role: "user", content: userMessage });
-
+export const queryAI = async (message, phoneContext = "", conversationContext = "") => {
   try {
-    const response = await groq.chat.completions.create({
+    let userContent = message;
+
+    if (phoneContext) {
+      userContent = `${message}\n\n---\nRelevant phones from database:\n${phoneContext}`;
+    }
+
+    if (conversationContext) {
+      userContent = `${conversationContext}\n\nCurrent question: ${userContent}`;
+    }
+
+    const completion = await groq.chat.completions.create({
       model: "llama-3.3-70b-versatile",
-      messages,
-      max_tokens: 1200,
-      temperature: 0.65,
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user",   content: userContent },
+      ],
+      temperature: 0.7,
+      max_tokens:  1024,
     });
-    return response.choices[0].message.content;
+
+    return completion.choices[0]?.message?.content || "No response generated.";
   } catch (err) {
-    logger.error("Groq error", { err: err.message });
-    throw new Error("AI service unavailable — try again shortly");
+    logger.error("Groq API error", { err: err.message });
+    throw new Error("AI service unavailable");
   }
 };

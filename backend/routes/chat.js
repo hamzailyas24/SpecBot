@@ -10,7 +10,6 @@ import crypto from "crypto";
 
 const router = express.Router();
 
-// POST /chat
 router.post("/",
   authenticate, chatLimiter,
   [body("message").trim().notEmpty().isLength({ max: 1000 })],
@@ -18,24 +17,24 @@ router.post("/",
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
-    const { message } = req.body;
+    const { message, history = [] } = req.body;
     const userId = req.user.id;
+    const hasHistory = Array.isArray(history) && history.length > 0;
 
-    // Cache key based on message content (shared across users for same query)
     const cacheKey = `chat:${crypto.createHash("sha256").update(message.toLowerCase().trim()).digest("hex")}`;
 
     try {
-      // Try cache first
-      const cached = await cacheGet(cacheKey);
-      if (cached) {
-        await pool.query(
-          "INSERT INTO chat_history (user_id, message, response, cached) VALUES ($1, $2, $3, true)",
-          [userId, message, cached]
-        );
-        return res.json({ response: cached, cached: true });
+      if (!hasHistory) {
+        const cached = await cacheGet(cacheKey);
+        if (cached) {
+          await pool.query(
+            "INSERT INTO chat_history (user_id, message, response, cached) VALUES ($1, $2, $3, true)",
+            [userId, message, cached]
+          );
+          return res.json({ response: cached, cached: true });
+        }
       }
 
-      // RAG: find similar phones for context
       const similarIds = await searchSimilarPhones(message, 5);
       let context = "";
       if (similarIds.length > 0) {
@@ -45,17 +44,24 @@ router.post("/",
         );
         context = rows
           .map((p) => {
-            // Extract key specs only — keeps context focused
             const s = p.specs || {};
             return `**${p.brand} ${p.model}**\nOS: ${s["Operating System"] || "?"} | CPU: ${s["CPU"] || "?"} | RAM: ${s["RAM Capacity"] || "?"} | Display: ${s["Display Type"] || "?"} | Battery: ${s["Nominal Battery Capacity"] || "?"} | Camera: ${s["Number of effective pixels"] || "?"}`;
           })
           .join("\n\n");
       }
 
-      const response = await queryAI(message, context);
+      let conversationContext = "";
+      if (hasHistory) {
+        const recent = history.slice(-6);
+        conversationContext = "\n\nPrevious conversation:\n" +
+          recent.map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`).join("\n");
+      }
 
-      // Cache for 1 hour
-      await cacheSet(cacheKey, response, 3600);
+      const response = await queryAI(message, context, conversationContext);
+
+      if (!hasHistory) {
+        await cacheSet(cacheKey, response, 3600);
+      }
 
       await pool.query(
         "INSERT INTO chat_history (user_id, message, response, cached) VALUES ($1, $2, $3, false)",
@@ -69,7 +75,6 @@ router.post("/",
   }
 );
 
-// POST /chat/compare — dedicated compare endpoint
 router.post("/compare",
   authenticate, chatLimiter,
   [body("phoneA").trim().notEmpty(), body("phoneB").trim().notEmpty()],
@@ -84,7 +89,6 @@ router.post("/compare",
       const cached = await cacheGet(cacheKey);
       if (cached) return res.json({ response: JSON.parse(cached), cached: true });
 
-      // Find both phones by name similarity
       const findPhone = async (name) => {
         const { rows } = await pool.query(
           `SELECT brand, model, specs FROM phones
@@ -125,21 +129,11 @@ router.post("/compare",
       const specA = formatSpecs(pA);
       const specB = formatSpecs(pB);
 
-      const prompt = `Compare these two phones in detail. Give a verdict on which is better overall and for different use cases.
-      
-Phone A: ${JSON.stringify(specA)}
-Phone B: ${JSON.stringify(specB)}
-
-Structure your response as:
-1. Quick spec comparison table (markdown)
-2. Category winners (camera, battery, performance, display, value)
-3. Who should buy Phone A vs Phone B
-4. Overall verdict`;
+      const prompt = `Compare these two phones in detail. Give a verdict on which is better overall and for different use cases.\n\nPhone A: ${JSON.stringify(specA)}\nPhone B: ${JSON.stringify(specB)}\n\nStructure your response as:\n1. Quick spec comparison table (markdown)\n2. Category winners (camera, battery, performance, display, value)\n3. Who should buy Phone A vs Phone B\n4. Overall verdict`;
 
       const aiResponse = await queryAI(prompt);
-
       const result = { phoneA: specA, phoneB: specB, analysis: aiResponse };
-      await cacheSet(cacheKey, JSON.stringify(result), 86400); // cache 24h
+      await cacheSet(cacheKey, JSON.stringify(result), 86400);
 
       res.json({ response: result, cached: false });
     } catch (err) {
@@ -148,7 +142,6 @@ Structure your response as:
   }
 );
 
-// GET /chat/history
 router.get("/history", authenticate, async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit) || 20, 100);
   const offset = parseInt(req.query.offset) || 0;
@@ -163,7 +156,6 @@ router.get("/history", authenticate, async (req, res) => {
   }
 });
 
-// DELETE /chat/history
 router.delete("/history", authenticate, async (req, res) => {
   try {
     await pool.query("DELETE FROM chat_history WHERE user_id = $1", [req.user.id]);

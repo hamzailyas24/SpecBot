@@ -9,7 +9,7 @@ import logger from "../utils/logger.js";
 
 const csvPath = process.argv[2] || process.env.DATASET_PATH;
 
-logger.info("=== GSM-AI Dataset Import ===");
+logger.info("=== SpecBot Dataset Import ===");
 
 try {
   const summary = await importDataset(csvPath);
