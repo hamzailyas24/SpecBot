@@ -1,0 +1,10 @@
+version: "3.9"
+
+services:
+  backend:
+    command: npx nodemon server.js
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+    environment:
+      NODE_ENV: development

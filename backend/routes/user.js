@@ -2,16 +2,17 @@ import express from "express";
 import { authenticate } from "../middlewares/auth.js";
 import { pool } from "../utils/db.js";
 import { searchSimilarPhones } from "../services/embeddingService.js";
+import { webSearch, formatWebResults } from "../services/webSearchService.js";
 
 const router = express.Router();
 
 // GET /user/phones/search?q=&brand=&year=&page=
 router.get("/phones/search", authenticate, async (req, res) => {
-  const q      = req.query.q?.trim() || "";
-  const brand  = req.query.brand?.trim() || "";
-  const year   = req.query.year?.trim() || "";
-  const page   = Math.max(parseInt(req.query.page) || 1, 1);
-  const limit  = 20;
+  const q = req.query.q?.trim() || "";
+  const brand = req.query.brand?.trim() || "";
+  const year = req.query.year?.trim() || "";
+  const page = Math.max(parseInt(req.query.page) || 1, 1);
+  const limit = 20;
   const offset = (page - 1) * limit;
 
   try {
@@ -170,6 +171,203 @@ router.get("/recommendations", authenticate, async (req, res) => {
     res.json(rows);
   } catch {
     res.status(500).json({ error: "Failed to fetch recommendations" });
+  }
+});
+
+// POST /user/matchmaker
+router.post("/matchmaker", authenticate, async (req, res) => {
+  const { lifestyle } = req.body;
+  if (!lifestyle || lifestyle.trim().length < 10) {
+    return res.status(400).json({ error: "Describe your usage in at least 10 characters" });
+  }
+
+  try {
+    // Step 1: AI se spec requirements extract karo
+    const extractPrompt = `A user described their phone usage as:
+"${lifestyle}"
+
+Extract the most important smartphone specs they need. Return ONLY a JSON object like this:
+{
+  "priorities": ["battery", "camera", "performance", "display", "storage"],
+  "minRam": "6GB",
+  "minBattery": "5000mAh",
+  "preferredOS": "Android",
+  "mustHave": ["fast charging", "night mode"],
+  "avoid": ["small battery"],
+  "searchQuery": "long battery life night camera AMOLED",
+  "summary": "One sentence explaining what this user needs"
+}
+Only return valid JSON, nothing else.`;
+
+    const { default: Groq } = await import("groq-sdk");
+    const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+
+    const extraction = await groq.chat.completions.create({
+      model: "llama-3.3-70b-versatile",
+      messages: [{ role: "user", content: extractPrompt }],
+      temperature: 0.1,
+      max_tokens: 512,
+    });
+
+    let specs;
+    try {
+      const raw = extraction.choices[0]?.message?.content || "{}";
+      specs = JSON.parse(raw.replace(/```json|```/g, "").trim());
+    } catch {
+      specs = { searchQuery: lifestyle, summary: "Custom search based on your description" };
+    }
+
+    // Step 2: Vector search in DB
+    const { searchSimilarPhones } = await import("../services/embeddingService.js");
+    const similarIds = await searchSimilarPhones(specs.searchQuery || lifestyle, 10);
+
+    let phoneList = [];
+    let usedWeb = false;
+
+    if (similarIds.length > 0) {
+      // DB se mila — full specs fetch karo
+      const { rows } = await pool.query(
+        `SELECT id, brand, model, specs FROM phones WHERE id = ANY($1::int[])`,
+        [similarIds]
+      );
+      phoneList = rows.map((p) => {
+        const s = p.specs || {};
+        return {
+          id: p.id,
+          name: `${p.brand} ${p.model}`,
+          battery: s["Nominal Battery Capacity"],
+          ram: s["RAM Capacity"],
+          storage: s["Non-volatile Memory Capacity"],
+          cpu: s["CPU"],
+          display: `${s["Display Diagonal"]} ${s["Display Type"]} ${s["Display Refresh Rate"] || ""}`,
+          camera: s["Number of effective pixels"],
+          charging: s["Max. Charging Power"],
+          os: s["Operating System"],
+          nfc: s["NFC"],
+          weight: s["Mass"],
+          year: s["Released Year"],
+          source: "database",
+        };
+      });
+    }
+
+    // DB mein kam results (< 3) ya koi nahi — web se bhi dhoondho
+    if (phoneList.length < 3) {
+      usedWeb = true;
+      const webQuery = `best smartphone for ${specs.searchQuery || lifestyle} specs review 2024`;
+      const { results: webResults } = await webSearch(webQuery);
+
+      if (webResults.length > 0) {
+        // Web results ko AI se structured phone list mein convert karo
+        const webExtractPrompt = `From these web search results about smartphones, extract up to 3 phone recommendations with their specs.
+
+Search results:
+${formatWebResults(webResults)}
+
+Return ONLY a JSON array:
+[
+  {
+    "id": null,
+    "name": "Brand Model",
+    "battery": "5000mAh",
+    "ram": "8GB",
+    "storage": "128GB",
+    "cpu": "Snapdragon 7s Gen 2",
+    "display": "6.7 inch AMOLED 120Hz",
+    "camera": "50MP",
+    "charging": "33W",
+    "os": "Android 14",
+    "source": "web",
+    "sourceUrl": "https://..."
+  }
+]
+Only return valid JSON array, nothing else. If no specific phones found, return [].`;
+
+        const webExtraction = await groq.chat.completions.create({
+          model: "llama-3.3-70b-versatile",
+          messages: [{ role: "user", content: webExtractPrompt }],
+          temperature: 0.1,
+          max_tokens: 800,
+        });
+
+        try {
+          const raw = webExtraction.choices[0]?.message?.content || "[]";
+          const webPhones = JSON.parse(raw.replace(/```json|```/g, "").trim());
+          // Web phones ko phoneList mein merge karo (duplicates avoid)
+          const existingNames = phoneList.map((p) => p.name.toLowerCase());
+          webPhones.forEach((wp, i) => {
+            if (!existingNames.includes(wp.name?.toLowerCase())) {
+              phoneList.push({ ...wp, id: `web-${i}` });
+            }
+          });
+        } catch {
+          // Web extraction fail — continue with whatever phoneList has
+        }
+      }
+    }
+
+    if (phoneList.length === 0) {
+      return res.json({ matches: [], specs, message: "No matches found" });
+    }
+
+    // Step 4: AI se har phone ko score karo aur explain karo
+
+
+    const rankPrompt = `User lifestyle: "${lifestyle}"
+
+User needs summary: ${specs.summary || ""}
+Priorities: ${(specs.priorities || []).join(", ")}
+Must have: ${(specs.mustHave || []).join(", ")}
+
+Available phones:
+${JSON.stringify(phoneList, null, 2)}
+
+Rank the TOP 3 phones for this user. Return ONLY a JSON array:
+[
+  {
+    "id": 123,
+    "name": "Brand Model",
+    "matchScore": 92,
+    "verdict": "Best choice because...",
+    "pros": ["Great battery", "Excellent night camera"],
+    "cons": ["Heavy weight"],
+    "bestFor": "Heavy YouTube watchers who need all-day battery"
+  }
+]
+Only return valid JSON array, nothing else.`;
+
+    const ranking = await groq.chat.completions.create({
+      model: "llama-3.3-70b-versatile",
+      messages: [{ role: "user", content: rankPrompt }],
+      temperature: 0.2,
+      max_tokens: 1024,
+    });
+
+    let matches = [];
+    try {
+      const raw = ranking.choices[0]?.message?.content || "[]";
+      matches = JSON.parse(raw.replace(/```json|```/g, "").trim());
+    } catch {
+      matches = phoneList.slice(0, 3).map((p) => ({
+        id: p.id,
+        name: p.name,
+        matchScore: 80,
+        verdict: "Good match for your needs",
+        pros: [],
+        cons: [],
+        bestFor: specs.summary || "",
+      }));
+    }
+
+    // Full specs bhi attach karo matches mein
+    const matchesWithSpecs = matches.map((m) => ({
+      ...m,
+      specs: phoneList.find((p) => p.id === m.id) || {},
+    }));
+
+    res.json({ matches: matchesWithSpecs, extracted: specs, usedWeb });
+  } catch (err) {
+    res.status(500).json({ error: err.message || "Matchmaker failed" });
   }
 });
 

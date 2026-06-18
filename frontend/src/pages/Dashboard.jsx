@@ -1,14 +1,17 @@
 import { useState, useRef } from "react";
-import { MessageSquare, Search, Clock, Sparkles } from "lucide-react";
+import {  MessageSquare, Search, Clock, Sparkles, Star } from "lucide-react";
 import { useAuthStore } from "../store/authStore.js";
 import Chat            from "../components/Chat.jsx";
 import PhoneSearch     from "../components/PhoneSearch.jsx";
 import ChatHistory     from "../components/ChatHistory.jsx";
 import Recommendations from "../components/Recommendations.jsx";
+import PhoneMatchmaker from "../components/PhoneMatchmaker.jsx";
+
 
 const TABS = [
   { id: "search",  label: "Search",  icon: Search },
   { id: "history", label: "History", icon: Clock },
+  { id: "matchmaker",  label: "Match",     icon: Sparkles },
   { id: "foryou",  label: "For You", icon: Sparkles },
 ];
 
@@ -72,6 +75,7 @@ export default function Dashboard() {
               />
             )}
             {tab === "foryou"  && <Recommendations />}
+            {tab === "matchmaker" && <PhoneMatchmaker />}
           </div>
         </div>
       </div>

@@ -1,0 +1,9 @@
+node_modules
+npm-debug.log
+.env
+dataset.csv
+*.zip
+.git
+.gitignore
+logs
+*.log
