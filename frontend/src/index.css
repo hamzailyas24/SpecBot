@@ -215,3 +215,19 @@
 .prose-ai tr:nth-child(even) td {
   background: rgba(30, 30, 42, 0.4);
 }
+
+.prose-ai table {
+  @apply w-full text-xs border-collapse my-3;
+}
+.prose-ai thead tr {
+  @apply bg-elevated border-b border-accent/30;
+}
+.prose-ai thead td {
+  @apply px-3 py-2 font-semibold text-accent;
+}
+.prose-ai tbody tr {
+  @apply border-b border-border hover:bg-elevated/50 transition-colors;
+}
+.prose-ai tbody td {
+  @apply px-3 py-2 text-subtle;
+}

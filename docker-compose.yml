@@ -45,6 +45,8 @@ services:
       NODE_ENV:  production
     volumes:
       - ./backend/dataset.csv:/app/dataset.csv:ro
+      - xenova_cache:/root/.cache/huggingface  # ← ye add karo
+
     ports:
       - "5000:5000"
     depends_on:
@@ -66,3 +68,4 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  xenova_cache:  # ← ye add karo

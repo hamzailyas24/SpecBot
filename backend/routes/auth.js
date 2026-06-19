@@ -1,5 +1,6 @@
 import express from "express";
 import bcrypt from "bcryptjs";
+import crypto from "crypto";
 import { body, validationResult } from "express-validator";
 import { pool } from "../utils/db.js";
 import { generateTokens, generateAccessToken, verifyRefreshToken } from "../utils/jwt.js";
@@ -7,6 +8,13 @@ import { refreshCookieOptions } from "../utils/cookies.js";
 import logger from "../utils/logger.js";
 
 const router = express.Router();
+
+// FIX #9: Hash the refresh token before storing it in the DB.
+// Storing raw JWTs means a DB read leak (SQL injection, backup, replica access)
+// gives an attacker long-lived sessions for every user. We store SHA-256(token)
+// and compare the hash on /refresh — the raw token is only ever in memory/cookie.
+const hashToken = (token) =>
+  crypto.createHash("sha256").update(token).digest("hex");
 
 router.post("/register",
   [body("email").isEmail().normalizeEmail(), body("password").isLength({ min: 8 }), body("name").trim().notEmpty()],
@@ -26,7 +34,8 @@ router.post("/register",
       );
 
       const { accessToken, refreshToken } = generateTokens(user);
-      await pool.query("UPDATE users SET refresh_token = $1 WHERE id = $2", [refreshToken, user.id]);
+      // Store hash, not the raw token
+      await pool.query("UPDATE users SET refresh_token = $1 WHERE id = $2", [hashToken(refreshToken), user.id]);
 
       res.cookie("refreshToken", refreshToken, refreshCookieOptions());
       res.status(201).json({ accessToken, user: { id: user.id, email: user.email, name: user.name, role: user.role } });
@@ -54,7 +63,7 @@ router.post("/login",
       }
 
       const { accessToken, refreshToken } = generateTokens(user);
-      await pool.query("UPDATE users SET refresh_token = $1 WHERE id = $2", [refreshToken, user.id]);
+      await pool.query("UPDATE users SET refresh_token = $1 WHERE id = $2", [hashToken(refreshToken), user.id]);
 
       res.cookie("refreshToken", refreshToken, refreshCookieOptions());
       res.json({ accessToken, user: { id: user.id, email: user.email, name: user.name, role: user.role } });
@@ -70,11 +79,14 @@ router.post("/refresh", async (req, res) => {
   if (!token) return res.status(401).json({ error: "No refresh token" });
   try {
     const payload = verifyRefreshToken(token);
-    const { rows } = await pool.query("SELECT * FROM users WHERE id = $1 AND refresh_token = $2", [payload.id, token]);
+    // Compare hash of incoming token against stored hash
+    const { rows } = await pool.query(
+      "SELECT * FROM users WHERE id = $1 AND refresh_token = $2",
+      [payload.id, hashToken(token)]
+    );
     if (!rows.length) return res.status(401).json({ error: "Invalid refresh token" });
 
     const user = rows[0];
-    // Issue new access token only — keep refresh cookie/DB value (avoids parallel-refresh races).
     const accessToken = generateAccessToken(user);
 
     res.json({

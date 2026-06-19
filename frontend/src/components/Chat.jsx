@@ -4,25 +4,63 @@ import api from "../api/client.js";
 import toast from "react-hot-toast";
 
 const SUGGESTIONS = [
-  "What's the best flagship phone in 2024?",
-  "Compare battery life: iPhone 15 vs Pixel 8",
+  "What's the best flagship phone in 2023?",
+  "Compare battery life iPhone 14 vs Pixel 8",
   "Best budget 5G phone under $300",
   "Which phone has the best ultrawide camera?",
 ];
 
+// FIX #8: Rewrote renderMarkdown to fix two bugs in the original:
+//
+// Bug 1 — The <ul> regex used a greedy `.*` with the `s` flag, which captured ALL
+// <li> tags in the entire response in one match, collapsing every list into one <ul>.
+// Fix: match runs of consecutive <li> lines using a non-greedy repeated group.
+//
+// Bug 2 — The final `.replace(/^(?!<[hul])/gm, "")` stripped the start of every
+// line that didn't begin with a tag, silently deleting plain-text paragraphs.
+// Fix: removed that broken line entirely.
 function renderMarkdown(text) {
-  return text
-    .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
-    .replace(/\*(.*?)\*/g, "<em>$1</em>")
-    .replace(/`([^`]+)`/g, "<code>$1</code>")
-    .replace(/^### (.+)$/gm, "<h3>$1</h3>")
-    .replace(/^## (.+)$/gm, "<h2>$1</h2>")
-    .replace(/^# (.+)$/gm, "<h1>$1</h1>")
-    .replace(/^- (.+)$/gm, "<li>$1</li>")
-    .replace(/(<li>.*<\/li>)/gs, "<ul>$1</ul>")
-    .replace(/\n{2,}/g, "</p><p>")
-    .replace(/^(?!<[hul])/gm, "")
-    .replace(/\n/g, "<br />");
+  // Tables
+  text = text.replace(/^\|(.+)\|$/gm, (line) => {
+    const cells = line.split("|").filter((c) => c.trim() !== "");
+    return `<tr>${cells.map((c) => `<td>${c.trim()}</td>`).join("")}</tr>`;
+  });
+
+  // Separator rows hata do (| --- | --- |)
+  text = text.replace(/<tr>(<td>[-: ]+<\/td>)+<\/tr>/g, "");
+
+  // Pehli tr ko thead banao
+  text = text.replace(/(<tr>.*?<\/tr>)/, "<thead>$1</thead>");
+
+  // Baaki rows tbody mein
+  text = text.replace(/((?:<tr>.*?<\/tr>\n?)+)$/m, (match, p1) => {
+    if (p1.includes("<thead>")) return p1;
+    return `<tbody>${p1}</tbody>`;
+  });
+
+  // Table wrap
+  text = text.replace(/((?:<(?:thead|tbody|tr)>.*?<\/(?:thead|tbody|tr)>\n?)+)/gs,
+    '<div class="overflow-x-auto my-3"><table class="w-full text-xs border-collapse">$1</table></div>'
+  );
+
+  // Bold, italic, code
+  text = text.replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>");
+  text = text.replace(/\*(.*?)\*/g, "<em>$1</em>");
+  text = text.replace(/`([^`]+)`/g, "<code class='bg-elevated px-1 rounded text-accent'>$1</code>");
+
+  // Headings
+  text = text.replace(/^### (.+)$/gm, "<h3 class='text-sm font-semibold mt-3 mb-1'>$1</h3>");
+  text = text.replace(/^## (.+)$/gm,  "<h2 class='text-sm font-bold mt-3 mb-1'>$2</h2>");
+  text = text.replace(/^# (.+)$/gm,   "<h1 class='text-base font-bold mt-3 mb-1'>$1</h1>");
+
+  // Lists
+  text = text.replace(/^- (.+)$/gm, "<li class='ml-3 list-disc'>$1</li>");
+  text = text.replace(/(<li.*<\/li>\n?)+/g, "<ul class='my-2 space-y-1'>$&</ul>");
+
+  // Paragraphs
+  text = text.replace(/\n{2,}/g, "</p><p class='mb-2'>");
+
+  return text;
 }
 
 function Bubble({ msg }) {

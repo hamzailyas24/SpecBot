@@ -8,7 +8,6 @@ import { cacheFlushPattern, isRedisAvailable } from "../utils/redis.js";
 const router = express.Router();
 router.use(authenticate, requireAdmin);
 
-// GET /admin/stats
 router.get("/stats", async (req, res) => {
   try {
     const [phones, users, chats, lastImport, embedStats, cacheHits] = await Promise.all([
@@ -16,9 +15,7 @@ router.get("/stats", async (req, res) => {
       pool.query("SELECT COUNT(*) FROM users"),
       pool.query("SELECT COUNT(*) FROM chat_history"),
       pool.query("SELECT * FROM import_runs ORDER BY created_at DESC LIMIT 1"),
-      pool.query(
-        "SELECT status, COUNT(*) FROM embedding_queue GROUP BY status"
-      ),
+      pool.query("SELECT status, COUNT(*) FROM embedding_queue GROUP BY status"),
       pool.query("SELECT COUNT(*) FILTER (WHERE cached=true) hits, COUNT(*) total FROM chat_history"),
     ]);
 
@@ -41,19 +38,16 @@ router.get("/stats", async (req, res) => {
   }
 });
 
-// POST /admin/import — trigger CSV import
 router.post("/import", async (req, res) => {
   res.json({ message: "Import started in background" });
   importDataset().catch((e) => console.error("Import error:", e));
 });
 
-// POST /admin/embed — process embedding queue
 router.post("/embed", async (req, res) => {
   res.json({ message: "Embedding queue started in background" });
   processEmbeddingQueue().catch((e) => console.error("Embed error:", e));
 });
 
-// GET /admin/import-runs
 router.get("/import-runs", async (req, res) => {
   try {
     const { rows } = await pool.query(
@@ -65,7 +59,6 @@ router.get("/import-runs", async (req, res) => {
   }
 });
 
-// GET /admin/embed-queue-status
 router.get("/embed-status", async (req, res) => {
   try {
     const { rows } = await pool.query(
@@ -77,21 +70,24 @@ router.get("/embed-status", async (req, res) => {
   }
 });
 
-// DELETE /admin/cache — flush Redis cache
+// FIX #10: Flush all cache namespaces including web-scrape caches.
+// Previously only chat:* and compare:* were flushed, leaving gsmarena/kimovil/phonearena
+// caches (7-day TTL) impossible to clear even after stale data was detected.
 router.delete("/cache", async (req, res) => {
   try {
     await Promise.all([
       cacheFlushPattern("chat:*"),
       cacheFlushPattern("compare:*"),
+      cacheFlushPattern("gsmarena:*"),
+      cacheFlushPattern("kimovil:*"),
+      cacheFlushPattern("phonearena:*"),
     ]);
-    res.json({ message: "Cache flushed" });
+    res.json({ message: "Cache flushed (chat + compare + scrape sources)" });
   } catch {
     res.status(500).json({ error: "Cache flush failed" });
   }
 });
 
-// ─── Phone Browser ───────────────────────────────────────────────
-// GET /admin/phones?q=&brand=&year=&page=
 router.get("/phones", async (req, res) => {
   const q      = req.query.q?.trim() || "";
   const brand  = req.query.brand?.trim() || "";
@@ -142,7 +138,6 @@ router.get("/phones", async (req, res) => {
   }
 });
 
-// GET /admin/phones/:id — full specs
 router.get("/phones/:id", async (req, res) => {
   try {
     const { rows } = await pool.query("SELECT * FROM phones WHERE id = $1", [req.params.id]);
@@ -153,7 +148,6 @@ router.get("/phones/:id", async (req, res) => {
   }
 });
 
-// GET /admin/users
 router.get("/users", async (req, res) => {
   const page = Math.max(parseInt(req.query.page) || 1, 1);
   try {
@@ -168,7 +162,6 @@ router.get("/users", async (req, res) => {
   }
 });
 
-// PATCH /admin/users/:id/role
 router.patch("/users/:id/role", async (req, res) => {
   const { role } = req.body;
   if (!["user", "admin"].includes(role)) {

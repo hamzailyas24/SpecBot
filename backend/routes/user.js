@@ -1,4 +1,5 @@
 import express from "express";
+import Groq from "groq-sdk";
 import { authenticate } from "../middlewares/auth.js";
 import { pool } from "../utils/db.js";
 import { searchSimilarPhones } from "../services/embeddingService.js";
@@ -6,13 +7,17 @@ import { webSearch, formatWebResults } from "../services/webSearchService.js";
 
 const router = express.Router();
 
-// GET /user/phones/search?q=&brand=&year=&page=
+// FIX #6: Instantiate Groq client once at module scope, not inside the request
+// handler. Previously a new SDK instance was created on every /matchmaker call,
+// plus two unnecessary dynamic imports (groq-sdk and embeddingService).
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+
 router.get("/phones/search", authenticate, async (req, res) => {
-  const q = req.query.q?.trim() || "";
-  const brand = req.query.brand?.trim() || "";
-  const year = req.query.year?.trim() || "";
-  const page = Math.max(parseInt(req.query.page) || 1, 1);
-  const limit = 20;
+  const q      = req.query.q?.trim() || "";
+  const brand  = req.query.brand?.trim() || "";
+  const year   = req.query.year?.trim() || "";
+  const page   = Math.max(parseInt(req.query.page) || 1, 1);
+  const limit  = 20;
   const offset = (page - 1) * limit;
 
   try {
@@ -63,19 +68,15 @@ router.get("/phones/search", authenticate, async (req, res) => {
   }
 });
 
-// GET /user/phones/brands — list of all brands for filter
 router.get("/phones/brands", authenticate, async (req, res) => {
   try {
-    const { rows } = await pool.query(
-      "SELECT DISTINCT brand FROM phones ORDER BY brand"
-    );
+    const { rows } = await pool.query("SELECT DISTINCT brand FROM phones ORDER BY brand");
     res.json(rows.map((r) => r.brand));
   } catch {
     res.status(500).json({ error: "Failed to fetch brands" });
   }
 });
 
-// GET /user/phones/:id
 router.get("/phones/:id", authenticate, async (req, res) => {
   try {
     const { rows } = await pool.query("SELECT * FROM phones WHERE id = $1", [req.params.id]);
@@ -86,7 +87,6 @@ router.get("/phones/:id", authenticate, async (req, res) => {
   }
 });
 
-// GET /user/favorites
 router.get("/favorites", authenticate, async (req, res) => {
   try {
     const { rows } = await pool.query(
@@ -106,7 +106,6 @@ router.get("/favorites", authenticate, async (req, res) => {
   }
 });
 
-// POST /user/favorites/:phoneId
 router.post("/favorites/:phoneId", authenticate, async (req, res) => {
   try {
     await pool.query(
@@ -119,7 +118,6 @@ router.post("/favorites/:phoneId", authenticate, async (req, res) => {
   }
 });
 
-// DELETE /user/favorites/:phoneId
 router.delete("/favorites/:phoneId", authenticate, async (req, res) => {
   try {
     await pool.query(
@@ -132,7 +130,6 @@ router.delete("/favorites/:phoneId", authenticate, async (req, res) => {
   }
 });
 
-// GET /user/recommendations
 router.get("/recommendations", authenticate, async (req, res) => {
   try {
     const { rows: favs } = await pool.query(
@@ -163,7 +160,6 @@ router.get("/recommendations", authenticate, async (req, res) => {
       return res.json(rows);
     }
 
-    // Fallback: recent phones
     const { rows } = await pool.query(
       `SELECT id, brand, model, specs->>'Released Year' AS year FROM phones
        ORDER BY specs->>'Released Year' DESC NULLS LAST LIMIT 12`
@@ -174,7 +170,6 @@ router.get("/recommendations", authenticate, async (req, res) => {
   }
 });
 
-// POST /user/matchmaker
 router.post("/matchmaker", authenticate, async (req, res) => {
   const { lifestyle } = req.body;
   if (!lifestyle || lifestyle.trim().length < 10) {
@@ -182,7 +177,6 @@ router.post("/matchmaker", authenticate, async (req, res) => {
   }
 
   try {
-    // Step 1: AI se spec requirements extract karo
     const extractPrompt = `A user described their phone usage as:
 "${lifestyle}"
 
@@ -199,9 +193,7 @@ Extract the most important smartphone specs they need. Return ONLY a JSON object
 }
 Only return valid JSON, nothing else.`;
 
-    const { default: Groq } = await import("groq-sdk");
-    const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-
+    // FIX #6: Use module-level groq instance instead of re-instantiating per request
     const extraction = await groq.chat.completions.create({
       model: "llama-3.3-70b-versatile",
       messages: [{ role: "user", content: extractPrompt }],
@@ -217,15 +209,13 @@ Only return valid JSON, nothing else.`;
       specs = { searchQuery: lifestyle, summary: "Custom search based on your description" };
     }
 
-    // Step 2: Vector search in DB
-    const { searchSimilarPhones } = await import("../services/embeddingService.js");
+    // FIX #6: searchSimilarPhones already imported at module scope — no dynamic import needed
     const similarIds = await searchSimilarPhones(specs.searchQuery || lifestyle, 10);
 
     let phoneList = [];
     let usedWeb = false;
 
     if (similarIds.length > 0) {
-      // DB se mila — full specs fetch karo
       const { rows } = await pool.query(
         `SELECT id, brand, model, specs FROM phones WHERE id = ANY($1::int[])`,
         [similarIds]
@@ -233,32 +223,30 @@ Only return valid JSON, nothing else.`;
       phoneList = rows.map((p) => {
         const s = p.specs || {};
         return {
-          id: p.id,
-          name: `${p.brand} ${p.model}`,
-          battery: s["Nominal Battery Capacity"],
-          ram: s["RAM Capacity"],
-          storage: s["Non-volatile Memory Capacity"],
-          cpu: s["CPU"],
-          display: `${s["Display Diagonal"]} ${s["Display Type"]} ${s["Display Refresh Rate"] || ""}`,
-          camera: s["Number of effective pixels"],
+          id:       p.id,
+          name:     `${p.brand} ${p.model}`,
+          battery:  s["Nominal Battery Capacity"],
+          ram:      s["RAM Capacity"],
+          storage:  s["Non-volatile Memory Capacity"],
+          cpu:      s["CPU"],
+          display:  `${s["Display Diagonal"]} ${s["Display Type"]} ${s["Display Refresh Rate"] || ""}`.trim(),
+          camera:   s["Number of effective pixels"],
           charging: s["Max. Charging Power"],
-          os: s["Operating System"],
-          nfc: s["NFC"],
-          weight: s["Mass"],
-          year: s["Released Year"],
-          source: "database",
+          os:       s["Operating System"],
+          nfc:      s["NFC"],
+          weight:   s["Mass"],
+          year:     s["Released Year"],
+          source:   "database",
         };
       });
     }
 
-    // DB mein kam results (< 3) ya koi nahi — web se bhi dhoondho
     if (phoneList.length < 3) {
       usedWeb = true;
       const webQuery = `best smartphone for ${specs.searchQuery || lifestyle} specs review 2024`;
       const { results: webResults } = await webSearch(webQuery);
 
       if (webResults.length > 0) {
-        // Web results ko AI se structured phone list mein convert karo
         const webExtractPrompt = `From these web search results about smartphones, extract up to 3 phone recommendations with their specs.
 
 Search results:
@@ -293,7 +281,6 @@ Only return valid JSON array, nothing else. If no specific phones found, return 
         try {
           const raw = webExtraction.choices[0]?.message?.content || "[]";
           const webPhones = JSON.parse(raw.replace(/```json|```/g, "").trim());
-          // Web phones ko phoneList mein merge karo (duplicates avoid)
           const existingNames = phoneList.map((p) => p.name.toLowerCase());
           webPhones.forEach((wp, i) => {
             if (!existingNames.includes(wp.name?.toLowerCase())) {
@@ -301,7 +288,7 @@ Only return valid JSON array, nothing else. If no specific phones found, return 
             }
           });
         } catch {
-          // Web extraction fail — continue with whatever phoneList has
+          // Web extraction failed — continue with whatever phoneList has
         }
       }
     }
@@ -309,9 +296,6 @@ Only return valid JSON array, nothing else. If no specific phones found, return 
     if (phoneList.length === 0) {
       return res.json({ matches: [], specs, message: "No matches found" });
     }
-
-    // Step 4: AI se har phone ko score karo aur explain karo
-
 
     const rankPrompt = `User lifestyle: "${lifestyle}"
 
@@ -349,17 +333,16 @@ Only return valid JSON array, nothing else.`;
       matches = JSON.parse(raw.replace(/```json|```/g, "").trim());
     } catch {
       matches = phoneList.slice(0, 3).map((p) => ({
-        id: p.id,
-        name: p.name,
-        matchScore: 80,
-        verdict: "Good match for your needs",
-        pros: [],
-        cons: [],
-        bestFor: specs.summary || "",
+        id:          p.id,
+        name:        p.name,
+        matchScore:  80,
+        verdict:     "Good match for your needs",
+        pros:        [],
+        cons:        [],
+        bestFor:     specs.summary || "",
       }));
     }
 
-    // Full specs bhi attach karo matches mein
     const matchesWithSpecs = matches.map((m) => ({
       ...m,
       specs: phoneList.find((p) => p.id === m.id) || {},

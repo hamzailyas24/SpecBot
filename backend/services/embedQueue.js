@@ -2,8 +2,8 @@ import { pool } from "../utils/db.js";
 import { addPhoneEmbedding } from "./embeddingService.js";
 import logger from "../utils/logger.js";
 
-const BATCH_SIZE = 500;   // 10x faster than old 10
-const CONCURRENCY = 50;   // max parallel embeddings at a time
+const BATCH_SIZE = 100;   // 10x faster than old 10
+const CONCURRENCY = 10;   // max parallel embeddings at a time
 const MAX_ATTEMPTS = 3;
 
 // Utility to process in limited concurrency

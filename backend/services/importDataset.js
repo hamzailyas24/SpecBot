@@ -14,7 +14,6 @@ export const importDataset = async (csvPath) => {
   const path = csvPath || process.env.DATASET_PATH || "./dataset.csv";
   logger.info("Dataset import starting", { path });
 
-  // Mark run as in-progress
   const { rows: [run] } = await pool.query(
     "INSERT INTO import_runs (status) VALUES ('running') RETURNING id"
   );
@@ -43,6 +42,9 @@ export const importDataset = async (csvPath) => {
     const brand = row["Brand"];
     const model = row["Model"];
     if (!brand || !model) { skipped++; continue; }
+
+    const year = parseInt(row["Released Year"]);
+    if (!isNaN(year) && year < 2010) { skipped++; continue; }
 
     const specs = {};
     for (const [k, v] of Object.entries(row)) {
@@ -79,43 +81,32 @@ export const importDataset = async (csvPath) => {
 const flushBatch = async (batch) => {
   let imported = 0, skipped = 0, errors = 0;
 
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
+  for (const { brand, model, specs } of batch) {
+    const client = await pool.connect();
+    try {
+      const res = await client.query(
+        `INSERT INTO phones (brand, model, specs)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (brand, model) DO NOTHING
+         RETURNING id`,
+        [brand, model, JSON.stringify(specs)]
+      );
 
-    for (const { brand, model, specs } of batch) {
-      try {
-        const res = await client.query(
-          `INSERT INTO phones (brand, model, specs)
-           VALUES ($1, $2, $3)
-           ON CONFLICT (model) DO NOTHING
-           RETURNING id`,
-          [brand, model, JSON.stringify(specs)]
+      if (res.rows.length > 0) {
+        await client.query(
+          "INSERT INTO embedding_queue (phone_id) VALUES ($1) ON CONFLICT DO NOTHING",
+          [res.rows[0].id]
         );
-
-        if (res.rows.length > 0) {
-          // Queue embedding — don't block import on HF API
-          await client.query(
-            "INSERT INTO embedding_queue (phone_id) VALUES ($1) ON CONFLICT DO NOTHING",
-            [res.rows[0].id]
-          );
-          imported++;
-        } else {
-          skipped++;
-        }
-      } catch (err) {
-        logger.error("Row error", { model, err: err.message });
-        errors++;
+        imported++;
+      } else {
+        skipped++;
       }
+    } catch (err) {
+      logger.error("Row error", { model, err: err.message });
+      errors++;
+    } finally {
+      client.release();
     }
-
-    await client.query("COMMIT");
-  } catch (err) {
-    await client.query("ROLLBACK");
-    logger.error("Batch rollback", { err: err.message });
-    errors += batch.length;
-  } finally {
-    client.release();
   }
 
   return { imported, skipped, errors };
